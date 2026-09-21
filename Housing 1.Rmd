@@ -1,0 +1,473 @@
+---
+title: "Housing 1"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+date: "Original project August 2026 | Portfolio revision September 21 2026"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project overview
+
+This ongoing project studies housing characteristics and sale prices in 1,460 Ames housing records. The original analysis covers missing-data rules, exploratory plots, and categorical feature engineering. Associations are descriptive and do not establish causal effects.
+
+The portfolio revision makes paths portable, corrects interpretations, and adds an exploratory regression benchmark in a separate script. The benchmark is a September 2026 extension, not an original August result.
+
+```{r}
+library(dplyr)
+library(tidyverse)
+housing <- read_csv("data/train.csv", show_col_types = FALSE)
+
+head(housing)
+tail(housing)
+
+str(housing)
+```
+
+## Missing summary
+```{r}
+missing_count <- colSums(is.na(housing))
+missing_percent <- colMeans(is.na(housing)) * 100
+
+missing_summary <- data.frame(
+  Variable = names(housing),
+  Missing_Count = missing_count,
+  Missing_Percent = round(missing_percent, 2)
+)
+
+missing_summary <- missing_summary[
+  missing_summary$Missing_Count > 0,
+]
+
+missing_summary <- missing_summary[
+  order(-missing_summary$Missing_Percent),
+]
+
+print(missing_summary)
+```
+The missing table show the variable that contains missing variable. According to the missing-value summary, the variables PoolQC, MiscFeature, Alley, Fence, and FireplaceQu have a high proportion of missing values, with more than 40% of their observations recorded as NA. However, after examining these variables more closely, many of these NAs are not true missing values. For example, PoolQC is automatically recorded as NA when a house does not have a pool. This is likely the main reason for the high percentage of missing values. Therefore, in the next step, we will convert these NAs to "None" where appropriate in order to identify the actual missing values in the dataset.
+
+
+## Replacing NA 
+```{r}
+# 1. Pool
+# PoolArea = 0 -> no pool
+housing$PoolQC[
+  is.na(housing$PoolQC) & housing$PoolArea == 0
+] <- "None"
+
+
+# 2. Fireplace
+# Fireplaces = 0 -> no fireplces
+housing$FireplaceQu[
+  is.na(housing$FireplaceQu) & housing$Fireplaces == 0
+] <- "None"
+
+
+# 3. Garage
+# GarageCars = 0 and GarageArea = 0 -> no garage
+no_garage <- housing$GarageCars == 0 & housing$GarageArea == 0
+
+garage_cat <- c(
+  "GarageType",
+  "GarageFinish",
+  "GarageQual",
+  "GarageCond"
+)
+
+for (v in garage_cat) {
+  housing[[v]][is.na(housing[[v]]) & no_garage] <- "None"
+}
+
+
+# 4. Basement
+# only TotalBsmtSF = 0 can be recognized as No Basement
+no_basement <- housing$TotalBsmtSF == 0
+bsmt_vars <- c(
+  "BsmtExposure",
+  "BsmtFinType2",
+  "BsmtQual",
+  "BsmtCond",
+  "BsmtFinType1"
+)
+
+for (v in bsmt_vars) {
+  housing[[v]][is.na(housing[[v]]) & no_basement] <- "None"
+}
+
+
+# 5. MiscFeature
+# MiscVal = 0 and Feature NA -> no miscellaneous feature
+housing$MiscFeature[
+  is.na(housing$MiscFeature) & housing$MiscVal == 0
+] <- "None"
+
+
+# 6. Alley
+# Ames data dictionary: NA = No alley access
+housing$Alley[is.na(housing$Alley)] <- "None"
+
+
+# 7. Fence
+# Ames data dictionary: NA = No Fence
+housing$Fence[is.na(housing$Fence)] <- "None"
+
+missing_count <- colSums(is.na(housing))
+missing_count[missing_count > 0]
+```
+After replacing the NAs that represent the absence of certain features with "None," the remaining missing values are much smaller. The variables that still contain missing values are LotFrontage, MasVnrType, MasVnrArea, BsmtExposure, BsmtFinType2, Electrical, and GarageYrBlt. Among them, LotFrontage has the largest number of missing values with 259, followed by GarageYrBlt with 81. Remaining values require variable-specific interpretation. In particular, GarageYrBlt is not applicable for homes with no garage; those 81 entries must not be treated as unknown construction years. Structural absence and unknown information remain distinct.
+
+
+## Numerical Variable vs. Sales Price Correlation:
+```{R}
+library(dplyr)
+library(knitr)
+
+# exclude vars
+excluded_vars <- c(
+  "Id",
+  "SalePrice",
+  "MSSubClass",
+  "MoSold",
+  "YrSold"
+)
+
+# true于 numerical correlation vars
+numerical_vars <- housing %>%
+  select(where(is.numeric)) %>%
+  select(-any_of(excluded_vars)) %>%
+  names()
+
+# cal each numerical variable vs. SalePrice corr
+price_correlation_table <- lapply(numerical_vars, function(variable) {
+
+  x <- housing[[variable]]
+  y <- housing$SalePrice
+
+  complete_rows <- complete.cases(x, y)
+
+  data.frame(
+    Variable = variable,
+    Pearson = cor(
+      x[complete_rows],
+      y[complete_rows],
+      method = "pearson"
+    ),
+    Spearman = cor(
+      x[complete_rows],
+      y[complete_rows],
+      method = "spearman"
+    )
+  )
+
+}) %>%
+  bind_rows() %>%
+  mutate(
+    # avg strength of to corr
+    CorrelationStrength =
+      (abs(Pearson) + abs(Spearman)) / 2,
+
+    PearsonSpearmanGap =
+      abs(Pearson - Spearman)
+  ) %>%
+  arrange(
+    desc(CorrelationStrength),
+    PearsonSpearmanGap
+  )
+
+# top 20 correlated vars
+price_correlation_table %>%
+  slice_head(n = 20) %>%
+  select(
+    Variable,
+    Pearson,
+    Spearman
+  ) %>%
+  kable(
+    digits = 3,
+    align = c("l", "r", "r"),
+    caption = paste(
+      "Numerical Variables Most Strongly Correlated",
+      "with SalePrice"
+    ),
+    col.names = c(
+      "Numerical Variable",
+      "Pearson Correlation",
+      "Spearman Correlation"
+    )
+  )
+```
+Since it is not practical to analyze every numerical variable in detail, an initial screening was conducted to identify the variables most strongly related to SalePrice. Both Pearson and Spearman correlations were used. Pearson correlation measures the strength of the linear relationship between two numerical variables, while Spearman correlation measures the strength of a monotonic relationship based on the ranking of the values. To obtain a more balanced comparison, the variables were ranked based on the average absolute Pearson and Spearman correlation coefficients. The top 20 numerical variables with the strongest overall correlations with SalePrice were then selected for further analysis. OverallQual, GrLivArea, GarageCars, GarageArea, and TotalBsmtSF were among the variables showing the strongest relationships with SalePrice.
+
+## Correlation among selected predictors
+```{R}
+library(dplyr)
+library(corrplot)
+
+selected_numerical_vars <- c(
+  "OverallQual",
+  "GrLivArea",
+  "GarageCars",
+  "GarageArea",
+  "TotalBsmtSF",
+  "FullBath",
+  "1stFlrSF",
+  "YearBuilt",
+  "GarageYrBlt",
+  "YearRemodAdd",
+  "TotRmsAbvGrd",
+  "Fireplaces"
+)
+
+# cal 12 predictors' Pearson correlation
+numerical_self_correlation <- housing %>%
+  select(all_of(selected_numerical_vars)) %>%
+  cor(
+    use = "pairwise.complete.obs",
+    method = "pearson"
+  )
+
+# draw heatmap
+corrplot(
+  numerical_self_correlation,
+  method = "color",
+  type = "upper",
+
+  order = "hclust",
+
+  addCoef.col = "black",
+  number.cex = 0.70,
+
+  tl.col = "black",
+  tl.srt = 45,
+  tl.cex = 0.85,
+
+  diag = FALSE,
+
+  # red negative corr, blue pos corr
+  col = colorRampPalette(
+    c("#B2182B", "#F7F7F7", "#2166AC")
+  )(200),
+
+  title = paste(
+    "Correlation Among the 12",
+    "Selected Numerical Predictors"
+  ),
+
+  mar = c(0, 0, 2, 0)
+)
+```
+
+Garage capacity and garage area carry overlapping information. Pairwise correlation alone does not establish a problematic regression design; model diagnostics and out-of-sample performance are needed before deciding whether to exclude a predictor.
+
+## GrLivArea vs Sale Price
+
+```{r}
+ggplot(housing, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Living Area vs Sale Price",
+    x = "Above Ground Living Area (sq ft)",
+    y = "Sale Price"
+  )
+```
+There is a strong positive relationship between `GrLivArea` and `SalePrice`. Houses with more above-groud space generally sell for higher prices.There are a few houses on the far right. For example, there are houses around 4500-5600 sqft that sold for only around $180000, even though houses that large would normally be expected to sell for much more, indicating possible outliers.
+
+## Overall Quality vs Sale Price
+
+```{r}
+ggplot(housing, aes(x = factor(OverallQual), y = SalePrice)) +
+  geom_boxplot() +
+  labs(
+    title = "Sale Price by Overall Quality",
+    x = "Overall Quality",
+    y = "Sale Price"
+  )
+```
+
+Median sale price generally increases with overall quality. The within-group variation does not establish rating errors: home size, neighborhood, age, and other characteristics can explain different prices among equally rated homes. Outliers should be investigated rather than automatically removed.
+
+
+## Neighborhood vs Sale Price
+
+```{r}
+library(ggplot2)
+library(forcats)
+
+ggplot(
+  housing,
+  aes(
+    x = fct_reorder(Neighborhood, SalePrice, median),
+    y = SalePrice
+  )
+) +
+  geom_boxplot() +
+  labs(
+    title = "Sale Price by Neighborhood",
+    subtitle = "Ordered by Median Sale Price",
+    x = "Neighborhood",
+    y = "Sale Price"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+Neighborhood matters as it may capture several things at the same time including location, school quality, nearby amenities, and desirability of the area. Therefore, even if two houses with similar size and garage capacity, they may sell for very different prices depending on where they are located. However, it still cannot explain price by itself.
+
+## Year Built vs Sale Price
+
+```{r}
+ggplot(housing, aes(x = YearBuilt, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Year Built vs Sale Price",
+    x = "Year Built",
+    y = "Sale Price"
+  )
+```
+From this scatterplot, we see there is a positive relationship between `YearBuilt` and `SalePrice`. Newer houses tend to have relatively higher sale prices. Although there is substantial variation among houses built in similar years. This suggests that year built is related to sale price, but other factors also matter such as overall quality and neighborhood.
+
+## Garage Area vs Sale Price
+```{r}
+ggplot(housing, aes(x = GarageArea, y = SalePrice)) +
+  geom_point(alpha = 0.4) +
+  labs(title = "Sale Price vs Garage Area",
+       x = "Garage Area", y = "Sale Price")
+```
+This scatterplot reflects a positive relationship between garage area and sale price. Houses with larger garages tend to have a higher sale prices, although there is substantial variation among houses with similar garage sizes. Few observations with usual large garage areas also have relatively low sale prices, showing that garage area alone cannot fully explain the sale price.
+
+## Garage Capacity vs Sale Price
+
+```{r}
+ggplot(housing, aes(x = factor(GarageCars), y = SalePrice)) +
+  geom_boxplot() +
+  labs(
+    title = "Sale Price by Garage Capacity",
+    x = "Garage Capacity (Cars)",
+    y = "Sale Price"
+  )
+```
+This boxplot suggests that sale price generally increases with garage capacity, particularly from zero to three grage spaces. Houses with three-car garages have the highest median sale price, while the median price for four-car garages is lower. This may due to the relatively smaller number of observations in this category. Therefore, garage capacity appears to be associated with sale price, but other housing characteristics should also be considered.
+
+## Overall Condition vs Sale Price
+
+```{r}
+ggplot(housing, aes(x = factor(OverallCond), y = SalePrice)) +
+  geom_boxplot() +
+  labs(
+    title = "Sale Price by Overall Condition",
+    x = "Overall Condition",
+    y = "Sale Price"
+  )
+```
+OverallCond = 5 contains many high-price outliers, partly because it represents a large share of the observations. In addition, overall condition alone does not determine sale price. Some houses with average condition may still have high sale prices because of other characteristics such as size, overall quality, neighborhood, or age.
+
+### Create the 15-feature data
+```{r filtered-categorical-housing}
+library(dplyr)
+
+categorical_source <- housing %>%
+  mutate(
+    Exterior1st = recode(Exterior1st,
+                         "CmentBd" = "CemntBd",
+                         "Brk Cmn" = "BrkComm",
+                         "Wd Shng" = "WdShing"),
+    Exterior2nd = recode(Exterior2nd,
+                         "CmentBd" = "CemntBd",
+                         "Brk Cmn" = "BrkComm",
+                         "Wd Shng" = "WdShing"),
+    HasMixedExterior = as.integer(Exterior1st != Exterior2nd)
+  )
+
+transport_conditions <- c("Artery", "Feedr", "RRAe", "RRAn", "RRNe", "RRNn")
+
+filtered_categorical_housing <- categorical_source %>%
+  transmute(
+    Neighborhood = relevel(factor(Neighborhood), ref = "NAmes"),
+    MSZoning = relevel(factor(MSZoning), ref = "RL"),
+    BldgType = relevel(factor(BldgType), ref = "1Fam"),
+
+    LotShape = as.integer(LotShape != "Reg"),
+    TransportExposure = as.integer(
+      Condition1 %in% transport_conditions |
+        Condition2 %in% transport_conditions
+    ),
+
+    ExterQual = recode(ExterQual,
+                      "Po" = 1L, "Fa" = 2L, "TA" = 3L, "Gd" = 4L, "Ex" = 5L),
+    KitchenQual = recode(KitchenQual,
+                        "Po" = 1L, "Fa" = 2L, "TA" = 3L, "Gd" = 4L, "Ex" = 5L),
+
+    Foundation = relevel(factor(
+      if_else(Foundation %in% c("Slab", "Stone", "Wood"), "Other", Foundation)
+    ), ref = "PConc"),
+
+    Exterior1st = relevel(factor(
+      if_else(Exterior1st %in% c("AsphShn", "BrkComm", "CBlock", "ImStucc", "Stone"),
+              "Other", Exterior1st)
+    ), ref = "VinylSd"),
+    HasMixedExterior = HasMixedExterior,
+
+    BsmtQual = relevel(factor(
+      if_else(TotalBsmtSF == 0, "None", coalesce(BsmtQual, "Unknown"))
+    ), ref = "TA"),
+    BsmtExposure = relevel(factor(
+      if_else(TotalBsmtSF == 0, "None", coalesce(BsmtExposure, "Unknown"))
+    ), ref = "No"),
+
+    GarageType = relevel(factor(case_when(
+      GarageCars == 0 & GarageArea == 0 ~ "None",
+      GarageType %in% c("2Types", "Basment", "CarPort") ~ "Other",
+      TRUE ~ coalesce(GarageType, "Unknown")
+    )), ref = "Attchd"),
+    GarageFinish = relevel(factor(
+      if_else(GarageCars == 0 & GarageArea == 0,
+              "None", coalesce(GarageFinish, "Unknown"))
+    ), ref = "Unf"),
+
+    HeatingQC = recode(HeatingQC,
+                      "Po" = 1L, "Fa" = 1L, "TA" = 2L, "Gd" = 3L, "Ex" = 4L)
+  )
+
+dim(filtered_categorical_housing)
+str(filtered_categorical_housing)
+```
+
+### Expand nominal variables into dummy columns
+```{r categorical-dummy-matrix}
+# Check first so model.matrix cannot silently drop rows containing NA.
+stopifnot(
+  ncol(filtered_categorical_housing) == 15,
+  nrow(filtered_categorical_housing) == nrow(housing),
+  !anyNA(filtered_categorical_housing)
+)
+
+filtered_categorical_housing_dummy <- as.data.frame(
+  model.matrix(
+    ~ .,
+    data = filtered_categorical_housing,
+    contrasts.arg = lapply(
+      filtered_categorical_housing %>% select(where(is.factor)),
+      function(x) contr.treatment(levels(x), base = 1)
+    )
+  )[, -1, drop = FALSE]
+)
+
+dim(filtered_categorical_housing_dummy)
+head(filtered_categorical_housing_dummy[, 1:6])
+
+stopifnot(
+  nrow(filtered_categorical_housing_dummy) == nrow(housing),
+  !anyNA(filtered_categorical_housing_dummy)
+)
+```
+
+
